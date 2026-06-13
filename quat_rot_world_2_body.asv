@@ -1,0 +1,23 @@
+function [x_body] = quat_rot_world_2_body (q0,qx,qy,qz,x_world)
+
+N=length(qx);
+M=length(x_world)
+x_world=zeros(1,N);
+
+for i=1:N
+
+w=q0(i);
+x=qx(i);
+y=qy(i);
+z=qz(i);
+
+R=[ (1-2*(y^2)-2*(z^2))  (2*x*y-2*w*z)  (2*x*z + 2*w*y) 
+    (2*x*y+2*w*z)      (1-2*(x^2)-2*(z^2))  (2*y*z-2*w*x)
+    (2*x*z + 2*w*y)    (2*y*z-2*w*x)      (1-2*(x^2)-2*(y^2)) ];
+
+x_body(N,:) = (R')*x_world ;
+
+
+end
+
+end

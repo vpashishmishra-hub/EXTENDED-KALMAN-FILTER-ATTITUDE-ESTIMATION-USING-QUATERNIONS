@@ -1,0 +1,395 @@
+% TRUTH TRAJECTORY
+clear; clc;
+
+dt = 0.01;
+T  = 30;
+t  = 0:dt:T;
+N  = length(t);
+
+% TRUE EULER ANGLES (degrees → radians)
+roll_true  = deg2rad(20 * sin(0.5*t));
+pitch_true = deg2rad(15 * sin(0.8*t + 0.5));
+yaw_true   = deg2rad(30 * sin(0.3*t + 1.0));
+
+%EULER TO QUATERNION ZYX
+[q0_true,qx_true,qy_true,qz_true]=euler2quaternion(yaw_true,pitch_true,roll_true);
+
+% TRUE ANGULAR VELOCITY (body frame)
+wx_true = zeros(1, N);
+wy_true = zeros(1, N);
+wz_true = zeros(1, N);
+
+for i = 1:N-1
+    droll  = (roll_true(i+1)  - roll_true(i))  / dt;
+    dpitch = (pitch_true(i+1) - pitch_true(i)) / dt;
+    dyaw   = (yaw_true(i+1)   - yaw_true(i))   / dt;
+
+    % Euler rates → body frame angular velocity
+    % This is the standard transformation matrix
+    sr = sin(roll_true(i));  cr = cos(roll_true(i));
+    sp = sin(pitch_true(i)); cp = cos(pitch_true(i));
+
+    wx_true(1,i) = droll  - dyaw*sp;
+    wy_true(1,i) = dpitch*cr + dyaw*sr*cp;
+    wz_true(1,i) = -dpitch*sr + dyaw*cr*cp;
+end
+wx_true(1,N) = wx_true(1,N-1);% repeat last
+wy_true(1,N) = wy_true(1,N-1);
+wz_true(1,N) = wz_true(1,N-1);
+
+
+% SENSOR SIMULATION
+
+% --- Gyroscope ---
+sigma_gyro  = 0.01;          % rad/s noise
+bias_true   = [0.02 -0.015 0.01];   % true bias rad/s
+
+wx_meas = zeros(1, N);
+wy_meas = zeros(1, N);
+wz_meas = zeros(1, N);
+
+for i = 1:N
+    wx_meas(1,i) = wx_true(1,i) + bias_true(1,1) + sigma_gyro*randn(1,1);
+    wy_meas(1,i) = wy_true(1,i) + bias_true(1,2) + sigma_gyro*randn(1,1);
+    wz_meas(1,i) = wz_true(1,i) + bias_true(1,3) + sigma_gyro*randn(1,1);
+end
+
+% --- Accelerometer ---
+g = 9.81;
+sigma_accel = 0.05;          % m/s² noise
+g_world = [0
+           0
+           g];        % gravity in world frame // 3*1 matrix
+
+g_body=quat_rot_world_2_body(q0_true, qx_true, qy_true, qz_true, g_world);  % gbody is 3*N size as it is gworld matrix after N rotations
+
+accel_meas= g_body + sigma_accel*randn(3,N); %adding noise only no bias
+    
+
+% --- Magnetometer ---
+sigma_mag = 0.05;
+m_world = [0.4
+            0
+            0.9];          % reference field in world frame (normalized) // another 3*1 vector
+
+m_body = quat_rot_world_2_body(q0_true, qx_true, qy_true, qz_true, m_world);  % another 3*N vector 
+
+m_meas= m_body + sigma_mag*randn(3,N);
+
+
+%KALMAN INIT
+
+x_current=[1
+           0
+           0
+           0
+           0
+           0
+           0];
+
+p_current = eye(7) * 0.01;         % small uncertainty to start
+
+dt = 0.01;                 
+sigma_gyro  = 0.01;        
+sigma_bias  = 1e-5;        
+sigma_accel = 0.1;         
+sigma_mag   = 0.1;         
+
+
+% R matrix (6x6)
+R = diag([sigma_accel^2, sigma_accel^2, sigma_accel^2, ...
+          sigma_mag^2,   sigma_mag^2,   sigma_mag^2]);
+
+g_world = [0
+           0
+           g];
+
+m_world = [0.4
+            0
+            0.9];
+
+sigma_b = sigma_bias;    
+
+x_store = zeros(7,N);
+
+for i= 1:N
+
+    % sensor reading
+
+    u=[wx_meas(1,i)
+       wy_meas(1,i)
+       wz_meas(1,i)];
+
+    Z=[accel_meas(1,i)
+       accel_meas(2,i)
+       accel_meas(3,i)
+       m_meas(1,i)
+       m_meas(2,i)
+       m_meas(3,i)];
+
+    % extracting quaternions
+    q0=x_current(1);
+    qx=x_current(2);
+    qy=x_current(3);
+    qz=x_current(4);
+    mx = m_world(1);
+    my = m_world(2);
+    mz = m_world(3);
+
+    %gyro bias correction  % u-x_current states
+    bx = x_current(5);
+    by = x_current(6);
+    bz = x_current(7);
+    wx = u(1) - bx;
+    wy = u(2) - by;
+    wz = u(3) - bz;
+
+
+    % build omega matrix
+    % what omega matrix
+
+    %building F Q AND G
+    F = [
+    1,            -wx*dt/2,     -wy*dt/2,     -wz*dt/2,      qx*dt/2,      qy*dt/2,      qz*dt/2;
+    wx*dt/2,       1,            wz*dt/2,     -wy*dt/2,     -q0*dt/2,      qz*dt/2,     -qy*dt/2;
+    wy*dt/2,      -wz*dt/2,      1,            wx*dt/2,     -qz*dt/2,     -q0*dt/2,      qx*dt/2;
+    wz*dt/2,       wy*dt/2,     -wx*dt/2,      1,            qy*dt/2,     -qx*dt/2,     -q0*dt/2;
+    0,             0,            0,            0,            1,            0,            0;
+    0,             0,            0,            0,            0,            1,            0;
+    0,             0,            0,            0,            0,            0,            1
+];
+
+    G = [
+    -qx*dt/2,     -qy*dt/2,     -qz*dt/2;
+     q0*dt/2,     -qz*dt/2,      qy*dt/2;
+     qz*dt/2,      q0*dt/2,     -qx*dt/2;
+    -qy*dt/2,      qx*dt/2,      q0*dt/2;
+     0,            0,            0;
+     0,            0,            0;
+     0,            0,            0
+];
+    
+    k=(sigma_gyro^2)*((dt/2)^2);
+
+ Q = [
+    k*(1-q0^2),   k*(-q0*qx),   k*(-q0*qy),   k*(-q0*qz),   0,           0,           0;
+    k*(-q0*qx),   k*(1-qx^2),   k*(-qx*qy),   k*(-qx*qz),   0,           0,           0;
+    k*(-q0*qy),   k*(-qx*qy),   k*(1-qy^2),   k*(-qy*qz),   0,           0,           0;
+    k*(-q0*qz),   k*(-qx*qz),   k*(-qy*qz),   k*(1-qz^2),   0,           0,           0;
+    0,            0,            0,            0,            sigma_b^2,   0,           0;
+    0,            0,            0,            0,            0,           sigma_b^2,   0;
+    0,            0,            0,            0,            0,           0,           sigma_b^2
+];
+
+
+ f = [
+    q0 + dt/2*(-qx*wx - qy*wy - qz*wz);
+    qx + dt/2*( q0*wx - qz*wy + qy*wz);
+    qy + dt/2*( qz*wx + q0*wy - qx*wz);
+    qz + dt/2*(-qy*wx + qx*wy + q0*wz);
+    bx;
+    by;
+    bz
+];
+
+
+ % KALMAN EQUATIONS
+
+ % prediction eqns
+ x_prediction= f ; % as X n+1,n = f(xn,u)
+ p_prediction= F*p_current*(F') + Q;
+
+% --- Use predicted state for measurement model ---
+q0_pred = x_prediction(1);
+qx_pred = x_prediction(2);
+qy_pred = x_prediction(3);
+qz_pred = x_prediction(4);
+
+% accelerometer predictions
+h = zeros(6,1);
+h(1) = 2*g*(qx_pred*qz_pred - q0_pred*qy_pred);
+h(2) = 2*g*(qy_pred*qz_pred + q0_pred*qx_pred);
+h(3) = g*(1 - 2*qx_pred^2 - 2*qy_pred^2);
+
+% magnetometer predictions
+h(4) = mx*(1-2*qy_pred^2-2*qz_pred^2) + 2*my*(qx_pred*qy_pred + q0_pred*qz_pred) + 2*mz*(qx_pred*qz_pred - q0_pred*qy_pred);
+h(5) = 2*mx*(qx_pred*qy_pred - q0_pred*qz_pred) + my*(1-2*qx_pred^2-2*qz_pred^2) + 2*mz*(qy_pred*qz_pred + q0_pred*qx_pred);
+h(6) = 2*mx*(qx_pred*qz_pred + q0_pred*qy_pred) + 2*my*(qy_pred*qz_pred - q0_pred*qx_pred) + mz*(1-2*qx_pred^2-2*qy_pred^2);
+
+% Measurement Jacobian H (using predicted quaternion)
+H = zeros(6,7);
+% Accelerometer part
+H(1,1) = -2*g*qy_pred;   H(1,2) =  2*g*qz_pred;   H(1,3) = -2*g*q0_pred;   H(1,4) =  2*g*qx_pred;
+H(2,1) =  2*g*qx_pred;   H(2,2) =  2*g*q0_pred;   H(2,3) =  2*g*qz_pred;   H(2,4) =  2*g*qy_pred;
+H(3,1) =  0;             H(3,2) = -4*g*qx_pred;   H(3,3) = -4*g*qy_pred;   H(3,4) =  0;
+% Magnetometer part
+H(4,1) =  2*my*qz_pred - 2*mz*qy_pred;
+H(4,2) =  2*my*qy_pred + 2*mz*qz_pred;
+H(4,3) = -4*mx*qy_pred + 2*my*qx_pred - 2*mz*q0_pred;
+H(4,4) = -4*mx*qz_pred + 2*my*q0_pred + 2*mz*qx_pred;
+
+H(5,1) = -2*mx*qz_pred + 2*mz*qx_pred;
+H(5,2) =  2*mx*qy_pred - 4*my*qx_pred + 2*mz*q0_pred;
+H(5,3) =  2*mx*qx_pred + 2*mz*qz_pred;
+H(5,4) = -2*mx*q0_pred - 4*my*qz_pred + 2*mz*qy_pred;
+
+H(6,1) =  2*mx*qy_pred - 2*my*qx_pred;
+H(6,2) =  2*mx*qz_pred - 2*my*q0_pred - 4*mz*qx_pred;
+H(6,3) =  2*mx*q0_pred + 2*my*qz_pred - 4*mz*qy_pred;
+H(6,4) =  2*mx*qx_pred + 2*my*qy_pred;
+% Biases have no effect
+H(:,5:7) = 0;
+
+
+ % kalman gain 
+ K=p_prediction*(H') / (H*p_prediction*(H') + R);
+
+ % state update equations
+ x_current=x_prediction + K*(Z-h);
+ p_current=(eye(7)-K*H)*p_prediction*(((eye(7)-K*H))') + K*R*K';
+
+ % normalization of quaternions
+ x_current(1:4) = x_current(1:4) / norm(x_current(1:4));
+
+ x_store(:,i) = x_current;
+
+
+end
+
+% CONVERT EKF QUATERNION OUTPUT TO EULER ANGLES
+roll_ekf  = zeros(1,N);
+pitch_ekf = zeros(1,N);
+yaw_ekf   = zeros(1,N);
+
+for i = 1:N
+    q0e = x_store(1,i);
+    qxe = x_store(2,i);
+    qye = x_store(3,i);
+    qze = x_store(4,i);
+
+    roll_ekf(i)  = atan2(2*(q0e*qxe + qye*qze), 1 - 2*(qxe^2 + qye^2));
+    pitch_ekf(i) = asin(2*(q0e*qye - qze*qxe));
+    yaw_ekf(i)   = atan2(2*(q0e*qze + qxe*qye), 1 - 2*(qye^2 + qze^2));
+end
+
+% CONVERT TO DEGREES
+roll_ekf_deg  = rad2deg(roll_ekf);
+pitch_ekf_deg = rad2deg(pitch_ekf);
+yaw_ekf_deg   = rad2deg(yaw_ekf);
+
+roll_true_deg  = rad2deg(roll_true);
+pitch_true_deg = rad2deg(pitch_true);
+yaw_true_deg   = rad2deg(yaw_true);
+
+% --------------------------------------------------------
+% PLOT 1: TRUE vs EKF EULER ANGLES
+% --------------------------------------------------------
+figure;
+subplot(3,1,1);
+plot(t, roll_true_deg,  'r',  'LineWidth', 1.5); hold on;
+plot(t, roll_ekf_deg,   'r--','LineWidth', 1.5);
+ylabel('deg'); title('Roll'); legend('True','EKF'); grid on;
+
+subplot(3,1,2);
+plot(t, pitch_true_deg, 'g',  'LineWidth', 1.5); hold on;
+plot(t, pitch_ekf_deg,  'g--','LineWidth', 1.5);
+ylabel('deg'); title('Pitch'); legend('True','EKF'); grid on;
+
+subplot(3,1,3);
+plot(t, yaw_true_deg,   'b',  'LineWidth', 1.5); hold on;
+plot(t, yaw_ekf_deg,    'b--','LineWidth', 1.5);
+ylabel('deg'); title('Yaw'); legend('True','EKF'); grid on;
+xlabel('Time (s)');
+sgtitle('True vs EKF Estimated Euler Angles');
+
+% --------------------------------------------------------
+% PLOT 2: EKF ESTIMATED BIAS vs TRUE BIAS
+% --------------------------------------------------------
+figure;
+subplot(3,1,1);
+plot(t, x_store(5,:), 'r', 'LineWidth', 1.5); hold on;
+yline(bias_true(1), 'r--', 'LineWidth', 1.5);
+ylabel('rad/s'); title('Bias X'); legend('EKF estimate','True bias'); grid on;
+
+subplot(3,1,2);
+plot(t, x_store(6,:), 'g', 'LineWidth', 1.5); hold on;
+yline(bias_true(2), 'g--', 'LineWidth', 1.5);
+ylabel('rad/s'); title('Bias Y'); legend('EKF estimate','True bias'); grid on;
+
+subplot(3,1,3);
+plot(t, x_store(7,:), 'b', 'LineWidth', 1.5); hold on;
+yline(bias_true(3), 'b--', 'LineWidth', 1.5);
+ylabel('rad/s'); title('Bias Z'); legend('EKF estimate','True bias'); grid on;
+xlabel('Time (s)');
+sgtitle('True Bias vs EKF Estimated Bias');
+
+% --------------------------------------------------------
+% PLOT 3: ESTIMATION ERROR
+% --------------------------------------------------------
+roll_error  = roll_true_deg  - roll_ekf_deg;
+pitch_error = pitch_true_deg - pitch_ekf_deg;
+yaw_error   = yaw_true_deg   - yaw_ekf_deg;
+
+figure;
+subplot(3,1,1);
+plot(t, roll_error,  'r', 'LineWidth', 1.2);
+ylabel('deg'); title('Roll Error (True - EKF)'); grid on;
+yline(0, 'k--');
+
+subplot(3,1,2);
+plot(t, pitch_error, 'g', 'LineWidth', 1.2);
+ylabel('deg'); title('Pitch Error (True - EKF)'); grid on;
+yline(0, 'k--');
+
+subplot(3,1,3);
+plot(t, yaw_error,   'b', 'LineWidth', 1.2);
+ylabel('deg'); title('Yaw Error (True - EKF)'); grid on;
+yline(0, 'k--');
+xlabel('Time (s)');
+sgtitle('EKF Estimation Error');
+
+% --------------------------------------------------------
+% PLOT 4: SENSOR vs EKF vs TRUE (Accel)
+% --------------------------------------------------------
+figure;
+subplot(3,1,1);
+plot(t, accel_meas(1,:), 'r.', 'MarkerSize', 1); hold on;
+plot(t, g_body(1,:),     'r',  'LineWidth', 1.5);
+ylabel('m/s²'); title('Accel X — dots=measured, line=true'); grid on;
+
+subplot(3,1,2);
+plot(t, accel_meas(2,:), 'g.', 'MarkerSize', 1); hold on;
+plot(t, g_body(2,:),     'g',  'LineWidth', 1.5);
+ylabel('m/s²'); title('Accel Y'); grid on;
+
+subplot(3,1,3);
+plot(t, accel_meas(3,:), 'b.', 'MarkerSize', 1); hold on;
+plot(t, g_body(3,:),     'b',  'LineWidth', 1.5);
+ylabel('m/s²'); title('Accel Z'); grid on;
+xlabel('Time (s)');
+sgtitle('Accelerometer: Measured vs True');
+
+% --------------------------------------------------------
+% PLOT 5: SENSOR vs TRUE (Mag)
+% --------------------------------------------------------
+figure;
+subplot(3,1,1);
+plot(t, m_meas(1,:), 'r.', 'MarkerSize', 1); hold on;
+plot(t, m_body(1,:), 'r',  'LineWidth', 1.5);
+ylabel(''); title('Mag X — dots=measured, line=true'); grid on;
+
+subplot(3,1,2);
+plot(t, m_meas(2,:), 'g.', 'MarkerSize', 1); hold on;
+plot(t, m_body(2,:), 'g',  'LineWidth', 1.5);
+ylabel(''); title('Mag Y'); grid on;
+
+subplot(3,1,3);
+plot(t, m_meas(3,:), 'b.', 'MarkerSize', 1); hold on;
+plot(t, m_body(3,:), 'b',  'LineWidth', 1.5);
+ylabel(''); title('Mag Z'); grid on;
+xlabel('Time (s)');
+sgtitle('Magnetometer: Measured vs True');
+
+
+% EXTRA CODE TO LOOK BETTER NOT MY CODE %
+
