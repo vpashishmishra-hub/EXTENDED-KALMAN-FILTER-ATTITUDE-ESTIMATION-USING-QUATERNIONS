@@ -1,2 +1,30 @@
+
 # EXTENDED-KALMAN-FILTER-ATTITUDE-ESTIMATION-USING-QUATERNIONS
 A  quaternion-based attitude EKF fusing gyro, accelerometer and magnetometer with bias estimation built from scratch.  
+
+nano README.md
+
+
+nano README.md
+
+TO RUN THE FILE SIMPLY OPEN THE main_ekf.m AND RUN IT IT WILL GIVE YOU ALL THE RESULTS.
+
+THERE ARE SOME OTHER FUNCTION FILES THEY SHOULDNT BE BOTHERED WITH.
+
+THE MODEL IS AN QUATERNION BASED EKF.
+
+TEST DATA IS GENERATED SIMPLY USING SIN FUNCTIONS. THEN THE DATA IS MODELLED INTO 3 SENSORS
+--> GYRO,ACCELRO,MAGNETO METERS
+
+THE INPUT STATE VECTOR IS 7 STATE x=[q0 qx qy qz bgx bgy bgz]^T AND WE HAVE 3 STATE CONTROL 
+INPUT u=[wx wy wz]^T
+
+ALL THE MATRICES ARE DERIVED MATHEMATICALLY BY HAND USING QUATERNION KINEMATICS.
+
+A SPECIAL EXEMPTION IS MADE FOR THE MATRIX Q PROCESS COVARIANCE MATRIX WHERE sigma_bias IS ADDED TO THE RIGHTMOST BELOW CORNER.
+
+It gives good results but there are some cons
+--> no real test data
+--> bias Modelled as constant random walk for gyroscope
+--> no magnetic disturbance simulated
+--> no linear acceleration Modelled
